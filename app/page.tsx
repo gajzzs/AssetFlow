@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "./lib/supabaseClient";
 import { 
   Building2, 
@@ -13,15 +14,40 @@ import {
   Loader2, 
   Sparkles,
   Clipboard,
-  Check
+  Check,
+  LogIn,
+  UserPlus
 } from "lucide-react";
 
 export default function Home() {
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState<"create" | "join">("create");
   const [loading, setLoading] = useState(false);
+
+  // Redirect to dashboard if already logged in as Admin
+  useEffect(() => {
+    const checkActiveSession = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          const { data: empData } = await supabase
+            .from("orgEmployee")
+            .select("Role, Status")
+            .eq("uuid", session.user.id)
+            .maybeSingle();
+          if (empData && empData.Role === "Admin" && empData.Status) {
+            router.push("/dashboard");
+          }
+        }
+      } catch (err) {
+        console.error("Session check error:", err);
+      }
+    };
+    checkActiveSession();
+  }, [router]);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<{
-    type: "create" | "join";
+    type: "create" | "join" | "login";
     orgName?: string;
     orgId: string;
     email: string;
@@ -41,6 +67,12 @@ export default function Home() {
   const [empName, setEmpName] = useState("");
   const [empEmail, setEmpEmail] = useState("");
   const [empPassword, setEmpPassword] = useState("");
+
+  // Existing Org Toggle Mode: "login" or "register" (join)
+  const [existingOrgMode, setExistingOrgMode] = useState<"login" | "register">("login");
+  const [loginOrgId, setLoginOrgId] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
 
   const [copied, setCopied] = useState(false);
 
@@ -110,6 +142,8 @@ export default function Home() {
         options: {
           data: {
             full_name: adminName,
+            orgID: generatedOrgId,
+            role: "Admin",
           }
         }
       });
@@ -130,6 +164,7 @@ export default function Home() {
             name: orgName.trim(),
             unID: generatedOrgId,
             email: adminEmail.trim(),
+            uid: authData.user.id,
           }
         ]);
 
@@ -220,6 +255,8 @@ export default function Home() {
         options: {
           data: {
             full_name: empName,
+            orgID: joinOrgId.trim(),
+            role: "Employee",
           }
         }
       });
@@ -243,11 +280,12 @@ export default function Home() {
             Role: "Employee",
             Status: false, 
             orgID: joinOrgId.trim(),
+            uuid: authData.user.id,
           }
         ]);
 
       if (employeeError) {
-        throw new Error(`Failed to create employee profile: ${employeeError.message}`);
+        throw new Error("Failed to create employee profile: " + employeeError.message);
       }
 
       // Successful Registration
@@ -265,6 +303,88 @@ export default function Home() {
       setEmpName("");
       setEmpEmail("");
       setEmpPassword("");
+
+    } catch (err: any) {
+      setError(err.message || "An unexpected error occurred.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+
+    if (!loginOrgId.trim() || !loginEmail.trim() || !loginPassword.trim()) {
+      setError("Please fill out all fields.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      // 1. Sign in using Supabase Auth
+      const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: loginEmail.trim(),
+        password: loginPassword.trim(),
+      });
+
+      if (signInError) {
+        throw signInError;
+      }
+
+      if (!authData.user) {
+        throw new Error("Failed to sign in.");
+      }
+
+      // 2. Fetch employee details to confirm membership and role for this specific organisation
+      const { data: empData, error: empError } = await supabase
+        .from("orgEmployee")
+        .select("Name, Role, Status, orgID")
+        .eq("uuid", authData.user.id)
+        .eq("orgID", loginOrgId.trim())
+        .maybeSingle();
+
+      if (empError) {
+        await supabase.auth.signOut();
+        throw new Error(`Failed to retrieve profile details: ${empError.message}`);
+      }
+
+      if (!empData) {
+        // If employee row is not found for this org ID, sign the user out to reject session
+        await supabase.auth.signOut();
+        throw new Error(`Authentication succeeded, but no record was found matching Organization ID "${loginOrgId.trim()}".`);
+      }
+
+      let orgName = "";
+      const { data: orgData } = await supabase
+        .from("orgList")
+        .select("name")
+        .eq("unID", empData.orgID)
+        .maybeSingle();
+      if (orgData) {
+        orgName = orgData.name;
+      }
+
+      setSuccess({
+        type: "login",
+        orgName: orgName || undefined,
+        orgId: empData.orgID,
+        email: loginEmail.trim(),
+        role: empData.Role || "Unknown",
+        status: empData.Status ? "Active" : "Pending Activation",
+      });
+
+      // Clear fields
+      setLoginOrgId("");
+      setLoginEmail("");
+      setLoginPassword("");
+
+      // Redirect if role is Admin and account is active
+      if (empData.Role === "Admin" && empData.Status) {
+        router.push("/dashboard");
+      }
 
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred.");
@@ -308,12 +428,18 @@ export default function Home() {
               <CheckCircle2 className="w-6 h-6 shrink-0 text-emerald-650" />
               <div className="flex-1">
                 <h3 className="text-base font-bold text-emerald-950">
-                  {success.type === "create" ? "Organisation Created!" : "Employee Registered!"}
+                  {success.type === "create" 
+                    ? "Organisation Created!" 
+                    : success.type === "join" 
+                      ? "Employee Registered!" 
+                      : "Login Successful!"}
                 </h3>
                 <p className="text-zinc-650 mt-1 font-medium">
                   {success.type === "create" 
                     ? `Successfully created "${success.orgName}" and registered your administrator account.`
-                    : `Registered under "${success.orgName}" successfully. Access requires activation.`
+                    : success.type === "join"
+                      ? `Registered under "${success.orgName}" successfully. Access requires activation.`
+                      : `Successfully logged into your account.`
                   }
                 </p>
               </div>
@@ -321,38 +447,58 @@ export default function Home() {
 
             {/* Quick Details Box */}
             <div className="mt-2 bg-white border border-zinc-200 rounded-xl p-4 flex flex-col gap-3 font-mono text-[13px] text-zinc-700 shadow-sm">
-              <div className="flex justify-between items-center py-1 border-b border-zinc-100">
-                <span className="text-zinc-400">Org ID:</span>
-                <div className="flex items-center gap-1.5 font-bold text-zinc-900">
-                  <span>{success.orgId}</span>
-                  <button 
-                    onClick={() => copyToClipboard(success.orgId)} 
-                    className="p-1 hover:bg-zinc-100 rounded transition-colors text-zinc-400 hover:text-zinc-700 cursor-pointer"
-                    title="Copy Org ID"
-                  >
-                    {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Clipboard className="w-3.5 h-3.5" />}
-                  </button>
+              {success.orgId && success.orgId !== "N/A" && (
+                <div className="flex justify-between items-center py-1 border-b border-zinc-100">
+                  <span className="text-zinc-400">Org ID:</span>
+                  <div className="flex items-center gap-1.5 font-bold text-zinc-900">
+                    <span>{success.orgId}</span>
+                    <button 
+                      onClick={() => copyToClipboard(success.orgId)} 
+                      className="p-1 hover:bg-zinc-100 rounded transition-colors text-zinc-400 hover:text-zinc-700 cursor-pointer"
+                      title="Copy Org ID"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Clipboard className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
+              {success.orgName && (
+                <div className="flex justify-between items-center py-1 border-b border-zinc-100">
+                  <span className="text-zinc-400">Org Name:</span>
+                  <span className="text-zinc-800">{success.orgName}</span>
+                </div>
+              )}
               <div className="flex justify-between items-center py-1 border-b border-zinc-100">
-                <span className="text-zinc-400">Admin/Email:</span>
+                <span className="text-zinc-400">{success.type === "login" ? "User Email:" : "Admin/Email:"}</span>
                 <span className="text-zinc-800">{success.email}</span>
               </div>
               <div className="flex justify-between items-center py-1 border-b border-zinc-100">
-                <span className="text-zinc-400">Initial Role:</span>
+                <span className="text-zinc-400">Role:</span>
                 <span className="text-indigo-650 font-semibold">{success.role}</span>
               </div>
               <div className="flex justify-between items-center py-1">
                 <span className="text-zinc-400">System Status:</span>
-                <span className={`font-semibold ${success.type === "create" ? "text-emerald-650" : "text-amber-650"}`}>
+                <span className={`font-semibold ${success.status === "Active" || success.status === "Active (Creator)" ? "text-emerald-650" : "text-amber-650"}`}>
                   {success.status}
                 </span>
               </div>
             </div>
 
-            <p className="text-xs text-zinc-500 text-center italic mt-1">
-              Please note: An email confirmation link has been sent. Check your inbox.
-            </p>
+            {success.role === "Admin" && (
+              <button
+                onClick={() => router.push("/dashboard")}
+                className="w-full mt-2 py-3 bg-indigo-650 hover:bg-indigo-600 text-white font-bold rounded-xl shadow-md hover:shadow-lg active:translate-y-0.5 hover:-translate-y-0.5 transition-all flex items-center justify-center gap-2 cursor-pointer text-sm"
+              >
+                Go to Admin Dashboard
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            )}
+
+            {success.type !== "login" && (
+              <p className="text-xs text-zinc-500 text-center italic mt-1">
+                Please note: An email confirmation link has been sent. Check your inbox.
+              </p>
+            )}
           </div>
         )}
 
@@ -479,85 +625,181 @@ export default function Home() {
               </button>
             </form>
           ) : (
-            /* JOIN ORG FORM */
-            <form onSubmit={handleJoinOrg} className="flex flex-col gap-5">
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Organisation ID</label>
-                <div className="relative">
-                  <Building2 className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. AF2026-07-Acme"
-                    value={joinOrgId}
-                    onChange={(e) => setJoinOrgId(e.target.value)}
-                    className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all font-mono text-sm tracking-wide"
-                  />
-                </div>
+            /* EXISTING ORG (LOGIN / JOIN) */
+            <div className="flex flex-col gap-6">
+              {/* Nested Toggle: Login or Register */}
+              <div className="flex border-b border-zinc-100 pb-3 justify-center gap-6">
+                <button
+                  type="button"
+                  onClick={() => { setExistingOrgMode("login"); setError(null); setSuccess(null); }}
+                  className={`pb-2 text-sm font-semibold flex items-center gap-1.5 border-b-2 transition-all cursor-pointer ${
+                    existingOrgMode === "login"
+                      ? "border-indigo-650 text-indigo-650"
+                      : "border-transparent text-zinc-400 hover:text-zinc-650"
+                  }`}
+                >
+                  <LogIn className="w-4 h-4" />
+                  Account Login
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setExistingOrgMode("register"); setError(null); setSuccess(null); }}
+                  className={`pb-2 text-sm font-semibold flex items-center gap-1.5 border-b-2 transition-all cursor-pointer ${
+                    existingOrgMode === "register"
+                      ? "border-indigo-650 text-indigo-650"
+                      : "border-transparent text-zinc-400 hover:text-zinc-650"
+                  }`}
+                >
+                  <UserPlus className="w-4 h-4" />
+                  Join as Employee
+                </button>
               </div>
 
-              <hr className="border-zinc-100 my-1" />
+              {existingOrgMode === "login" ? (
+                /* LOGIN FORM */
+                <form onSubmit={handleLogin} className="flex flex-col gap-5">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Organisation ID</label>
+                    <div className="relative">
+                      <Building2 className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. AF2026-07-Acme"
+                        value={loginOrgId}
+                        onChange={(e) => setLoginOrgId(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all font-mono text-sm tracking-wide"
+                      />
+                    </div>
+                  </div>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Employee Name</label>
-                <div className="relative">
-                  <User className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="First & Last Name"
-                    value={empName}
-                    onChange={(e) => setEmpName(e.target.value)}
-                    className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                  />
-                </div>
-              </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Email Address</label>
+                    <div className="relative">
+                      <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="email"
+                        required
+                        placeholder="yourname@domain.com"
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
+                      />
+                    </div>
+                  </div>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Employee Email</label>
-                <div className="relative">
-                  <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                  <input
-                    type="email"
-                    required
-                    placeholder="yourname@domain.com"
-                    value={empEmail}
-                    onChange={(e) => setEmpEmail(e.target.value)}
-                    className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                  />
-                </div>
-              </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="password"
+                        required
+                        placeholder="••••••••"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
+                      />
+                    </div>
+                  </div>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Employee Password</label>
-                <div className="relative">
-                  <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                  <input
-                    type="password"
-                    required
-                    placeholder="Min 6 characters"
-                    value={empPassword}
-                    onChange={(e) => setEmpPassword(e.target.value)}
-                    className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                  />
-                </div>
-              </div>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full mt-2 py-3.5 bg-indigo-650 hover:bg-indigo-600 text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/10 hover:shadow-indigo-600/25 flex items-center justify-center gap-2 hover:-translate-y-0.5 active:translate-y-0 transition-all disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
+                  >
+                    {loading ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        Sign In
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+                </form>
+              ) : (
+                /* JOIN (REGISTER) ORG FORM */
+                <form onSubmit={handleJoinOrg} className="flex flex-col gap-5">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Organisation ID</label>
+                    <div className="relative">
+                      <Building2 className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. AF2026-07-Acme"
+                        value={joinOrgId}
+                        onChange={(e) => setJoinOrgId(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all font-mono text-sm tracking-wide"
+                      />
+                    </div>
+                  </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full mt-2 py-3.5 bg-indigo-650 hover:bg-indigo-600 text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/10 hover:shadow-indigo-600/25 flex items-center justify-center gap-2 hover:-translate-y-0.5 active:translate-y-0 transition-all disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
-              >
-                {loading ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <>
-                    Register Employee Account
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
-              </button>
-            </form>
+                  <hr className="border-zinc-100 my-1" />
+
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Employee Name</label>
+                    <div className="relative">
+                      <User className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="text"
+                        required
+                        placeholder="First & Last Name"
+                        value={empName}
+                        onChange={(e) => setEmpName(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Employee Email</label>
+                    <div className="relative">
+                      <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="email"
+                        required
+                        placeholder="yourname@domain.com"
+                        value={empEmail}
+                        onChange={(e) => setEmpEmail(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Employee Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                      <input
+                        type="password"
+                        required
+                        placeholder="Min 6 characters"
+                        value={empPassword}
+                        onChange={(e) => setEmpPassword(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 bg-white border border-zinc-200 focus:border-indigo-500 rounded-xl text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full mt-2 py-3.5 bg-indigo-650 hover:bg-indigo-600 text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/10 hover:shadow-indigo-600/25 flex items-center justify-center gap-2 hover:-translate-y-0.5 active:translate-y-0 transition-all disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
+                  >
+                    {loading ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        Register Employee Account
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+            </div>
           )}
 
         </div>
@@ -569,5 +811,5 @@ export default function Home() {
         </div>
       </div>
     </div>
-  );;
+  );
 }
