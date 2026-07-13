@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { supabase } from "../lib/supabaseClient";
 import OrgSetup from "./components/OrgSetup";
 import AssetsManager from "./components/AssetsManager";
+import AllocationTransfer from "./components/AllocationTransfer";
 import {
   LayoutDashboard,
   Building,
@@ -416,6 +417,8 @@ export default function Dashboard() {
             <OrgSetup orgId={adminUser?.orgId || ""} />
           ) : activeTab === "Assets" ? (
             <AssetsManager orgId={adminUser?.orgId || ""} onAssetAdded={() => adminUser && refreshStats(adminUser.orgId)} />
+          ) : activeTab === "Allocation & Transfer" ? (
+            <AllocationTransfer orgId={adminUser?.orgId || ""} />
           ) : (
             <div className="bg-white border border-zinc-200/80 rounded-2xl p-12 text-center flex flex-col items-center justify-center gap-4">
               <Sliders className="w-12 h-12 text-zinc-350 animate-bounce" />
